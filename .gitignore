@@ -1,0 +1,5 @@
+/target
+
+# Nix related
+.direnv/
+/result
