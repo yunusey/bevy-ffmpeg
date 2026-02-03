@@ -1,74 +1,8 @@
 use crossbeam_channel::{Receiver, RecvError, SendError, Sender, bounded};
 use ffmpeg_next as ffmpeg;
-use ffmpeg_sys_next as sys;
 use num_rational::Ratio;
 use std::ptr;
 use std::thread;
-
-/// RAII wrapper for SwsContext that automatically frees the context when dropped
-struct SwsContextWrapper(*mut sys::SwsContext);
-
-impl SwsContextWrapper {
-    unsafe fn new(src_w: u32, src_h: u32, src_fmt: sys::AVPixelFormat) -> Option<Self> {
-        let ctx = sys::sws_getContext(
-            src_w as i32,
-            src_h as i32,
-            src_fmt,
-            src_w as i32,
-            src_h as i32,
-            sys::AVPixelFormat::AV_PIX_FMT_RGBA,
-            sys::SwsFlags::SWS_BILINEAR as i32,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-
-        if ctx.is_null() {
-            None
-        } else {
-            Some(SwsContextWrapper(ctx))
-        }
-    }
-
-    fn as_ptr(&self) -> *mut sys::SwsContext {
-        self.0
-    }
-}
-
-impl Drop for SwsContextWrapper {
-    fn drop(&mut self) {
-        unsafe {
-            sys::sws_freeContext(self.0);
-        }
-    }
-}
-
-unsafe fn scale_into_pool_buffer(
-    sws: *mut sys::SwsContext,
-    frame: *const sys::AVFrame,
-    width: u32,
-    height: u32,
-    buffer: &mut [u8],
-) {
-    let mut dst_data: [*mut u8; 4] = [
-        buffer.as_mut_ptr(),
-        ptr::null_mut(),
-        ptr::null_mut(),
-        ptr::null_mut(),
-    ];
-
-    let mut dst_linesize: [i32; 4] = [(width as i32) * 4, 0, 0, 0];
-
-    sys::sws_scale(
-        sws,
-        (*frame).data.as_ptr() as *const *const u8,
-        (*frame).linesize.as_ptr(),
-        0,
-        height as i32,
-        dst_data.as_mut_ptr(),
-        dst_linesize.as_mut_ptr(),
-    );
-}
 
 #[derive(Debug, Clone)]
 pub struct FramePool {
@@ -175,29 +109,53 @@ fn run_ffmpeg(tx: Sender<FfmpegMessage>, path: &str) -> Result<(), SendError<Ffm
     })?;
 
     let mut decoded = ffmpeg::util::frame::Video::empty();
-    let sws_context =
-        match unsafe { SwsContextWrapper::new(width, height, decoder.format().into()) } {
-            Some(ctx) => ctx,
-            None => {
-                return tx.send(FfmpegMessage::Error(
-                    "Couldn't create sws_context... quitting from ffmpeg thread".to_string(),
-                ));
-            }
-        };
+    let mut scaler = ffmpeg::software::scaling::Context::get(
+        decoder.format(),
+        decoder.width(),
+        decoder.height(),
+        ffmpeg::format::Pixel::RGBA,
+        decoder.width(),
+        decoder.height(),
+        ffmpeg::software::scaling::Flags::BILINEAR,
+    )
+    .unwrap();
 
-    let handle_frame =
+    let mut handle_frame =
         |decoded: &ffmpeg::util::frame::Video| -> Result<(), SendError<FfmpegMessage>> {
             loop {
                 if let Ok(mut buffer) = pool.get() {
+                    let mut rgb_frame = ffmpeg::util::frame::Video::empty();
+                    rgb_frame.set_width(width);
+                    rgb_frame.set_height(height);
+                    rgb_frame.set_format(ffmpeg::format::Pixel::RGBA);
+
+                    // NOTE: This unsafe code seems to be unavoidable unfortunately. ffmpeg-next is
+                    // awesome and tries to keep things as safe as possible, but unfortunately, it
+                    // also puts limit to the performance to some extent. There seems to be two
+                    // different ways to use ffmpeg-next's pipeline:
+                    // 1. Just create an empty video frame, pass it to the scaler, and let ffmpeg
+                    //    *allocate* a new buffer for you, set the video's data to be this new
+                    //    buffer, and you got yourself an allocated buffer that you have to, now,
+                    //    copy back to the buffer (cost: allocation + copying)
+                    // 2. Get your hands dirty, and set the data of the empty video frame to be
+                    //    your buffer directly so that the scaler can directly write to it and you
+                    //    do not have any allocation or copying.
+                    // We'll go with 2 :D
                     unsafe {
-                        scale_into_pool_buffer(
-                            sws_context.as_ptr(),
-                            decoded.as_ptr(),
-                            width,
-                            height,
-                            &mut buffer,
-                        );
+                        let frame_ptr = rgb_frame.as_mut_ptr();
+
+                        (*frame_ptr).data[0] = buffer.as_mut_ptr();
+                        (*frame_ptr).data[1] = ptr::null_mut();
+                        (*frame_ptr).data[2] = ptr::null_mut();
+                        (*frame_ptr).data[3] = ptr::null_mut();
+
+                        (*frame_ptr).linesize[0] = (width * 4) as i32;
+                        (*frame_ptr).linesize[1] = 0;
+                        (*frame_ptr).linesize[2] = 0;
+                        (*frame_ptr).linesize[3] = 0;
                     }
+
+                    scaler.run(decoded, &mut rgb_frame).unwrap();
 
                     return tx.send(FfmpegMessage::Frame(VideoFrame {
                         width,
@@ -206,8 +164,9 @@ fn run_ffmpeg(tx: Sender<FfmpegMessage>, path: &str) -> Result<(), SendError<Ffm
                         pts: decoded.pts(),
                     }));
                 }
-                // No buffers for us :( gotta wait some time
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                // No buffers for us :( gotta wait some time; hardcoded to 16ms, but I think I'll
+                // have it configurable through plugin settings.
+                std::thread::sleep(std::time::Duration::from_millis(16));
             }
         };
 
