@@ -126,10 +126,12 @@ fn run_ffmpeg(tx: Sender<FfmpegMessage>, path: &str) -> Result<(), SendError<Ffm
         |decoded: &ffmpeg::util::frame::Video| -> Result<(), SendError<FfmpegMessage>> {
             loop {
                 if let Ok(mut buffer) = pool.get() {
+                    let scaler_output_definition = scaler.output();
+
                     let mut rgb_frame = ffmpeg::util::frame::Video::empty();
-                    rgb_frame.set_width(width);
-                    rgb_frame.set_height(height);
-                    rgb_frame.set_format(ffmpeg::format::Pixel::RGBA);
+                    rgb_frame.set_width(scaler_output_definition.width);
+                    rgb_frame.set_height(scaler_output_definition.height);
+                    rgb_frame.set_format(scaler_output_definition.format);
 
                     // NOTE: This unsafe code seems to be unavoidable unfortunately. ffmpeg-next is
                     // awesome and tries to keep things as safe as possible, but unfortunately, it
