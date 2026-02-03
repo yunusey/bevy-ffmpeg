@@ -109,7 +109,7 @@ fn run_ffmpeg(tx: Sender<FfmpegMessage>, path: &str) -> Result<(), SendError<Ffm
     })?;
 
     let mut decoded = ffmpeg::util::frame::Video::empty();
-    let mut scaler = ffmpeg::software::scaling::Context::get(
+    let mut scaler = match ffmpeg::software::scaling::Context::get(
         decoder.format(),
         decoder.width(),
         decoder.height(),
@@ -117,8 +117,10 @@ fn run_ffmpeg(tx: Sender<FfmpegMessage>, path: &str) -> Result<(), SendError<Ffm
         decoder.width(),
         decoder.height(),
         ffmpeg::software::scaling::Flags::BILINEAR,
-    )
-    .unwrap();
+    ) {
+        Ok(scaler) => scaler,
+        Err(err) => return send_error(err),
+    };
 
     let mut handle_frame =
         |decoded: &ffmpeg::util::frame::Video| -> Result<(), SendError<FfmpegMessage>> {
@@ -155,7 +157,9 @@ fn run_ffmpeg(tx: Sender<FfmpegMessage>, path: &str) -> Result<(), SendError<Ffm
                         (*frame_ptr).linesize[3] = 0;
                     }
 
-                    scaler.run(decoded, &mut rgb_frame).unwrap();
+                    if let Err(err) = scaler.run(decoded, &mut rgb_frame) {
+                        send_error(err)?;
+                    }
 
                     return tx.send(FfmpegMessage::Frame(VideoFrame {
                         width,
