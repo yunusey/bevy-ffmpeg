@@ -66,7 +66,7 @@ fn video_update_system(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut video_texture: ResMut<VideoTexture>,
-    mut video_playback: Option<ResMut<VideoPlayback>>,
+    video_playback: Option<ResMut<VideoPlayback>>,
     mut ffmpeg_data: ResMut<FfmpegData>,
 ) {
     let current_time = time.elapsed_secs_f64();
@@ -131,6 +131,8 @@ fn video_update_system(
     while let Some(frame) = engine.peek_video_frame(track_id) {
         // We don't support invalid pts for now.
         let Some(pts) = frame.pts else {
+            let frame = engine.try_get_video_frame(track_id).unwrap();
+            engine.reycle_video_frame_buffer(track_id, frame.data);
             continue;
         };
 
@@ -173,7 +175,7 @@ fn overlay_ui(
     time: Res<Time>,
     mut contexts: EguiContexts,
     mut ffmpeg_data: ResMut<FfmpegData>,
-    mut video_playback: Option<ResMut<VideoPlayback>>,
+    video_playback: Option<ResMut<VideoPlayback>>,
 ) {
     let track_id: TrackId = ffmpeg_data.track_id;
     let engine: &mut MediaEngine = &mut ffmpeg_data.media_engine;
@@ -187,7 +189,7 @@ fn overlay_ui(
         .show(context, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Play/Pause").clicked() {
-                    let Some(video_playback) = video_playback.as_mut() else {
+                    let Some(mut video_playback) = video_playback else {
                         return;
                     };
                     match engine.get_state(track_id).unwrap() {
