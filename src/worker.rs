@@ -123,7 +123,5 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                 }
             }
         }
-
-        //std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }

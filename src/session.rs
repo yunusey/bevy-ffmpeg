@@ -37,6 +37,46 @@ pub enum Packet {
     Eof,
 }
 
+/// This unsafe code seems to be unavoidable unfortunately. ffmpeg-next is
+/// awesome and tries to keep things as safe as possible, but unfortunately, it
+/// also puts limit to the performance to some extent. There seems to be two
+/// different ways to use ffmpeg-next's pipeline:
+/// 1. Just create an empty video frame, pass it to the scaler, and let ffmpeg
+///    *allocate* a new buffer for you, set the video's data to be this new
+///    buffer, and you got yourself an allocated buffer that you have to, now,
+///    copy back to the buffer (cost: allocation + copying)
+/// 2. Get your hands dirty, and set the data of the empty video frame to be
+///    your buffer directly so that the scaler can directly write to it and you
+///    do not have any allocation or copying.
+/// We'll go with 2 :D
+fn create_video_frame_from_buffer(
+    width: u32,
+    height: u32,
+    format: ffmpeg::format::Pixel,
+    buffer: &mut Vec<u8>,
+) -> ffmpeg::util::frame::Video {
+    let mut frame = ffmpeg::util::frame::Video::empty();
+    frame.set_width(width);
+    frame.set_height(height);
+    frame.set_format(format);
+
+    unsafe {
+        let frame_ptr = frame.as_mut_ptr();
+
+        (*frame_ptr).data[0] = buffer.as_mut_ptr() as *mut u8;
+        (*frame_ptr).data[1] = ptr::null_mut();
+        (*frame_ptr).data[2] = ptr::null_mut();
+        (*frame_ptr).data[3] = ptr::null_mut();
+
+        (*frame_ptr).linesize[0] = (width * 4) as i32;
+        (*frame_ptr).linesize[1] = 0;
+        (*frame_ptr).linesize[2] = 0;
+        (*frame_ptr).linesize[3] = 0;
+    }
+
+    frame
+}
+
 pub fn load_media_session(source: &str) -> Result<MediaSession, ffmpeg::Error> {
     ffmpeg::init()?;
     let input_format_ctx = ffmpeg::format::input(source)?;
@@ -104,39 +144,13 @@ pub fn process_packet(
 
             while video.decoder.receive_frame(&mut video.decoded).is_ok() {
                 if let Ok(mut buffer) = pool.get() {
-                    let mut rgb_frame = ffmpeg::util::frame::Video::empty();
-                    rgb_frame.set_width(video.width);
-                    rgb_frame.set_height(video.height);
-                    rgb_frame.set_format(ffmpeg::format::Pixel::RGBA);
-
-                    // NOTE: This unsafe code seems to be unavoidable unfortunately. ffmpeg-next is
-                    // awesome and tries to keep things as safe as possible, but unfortunately, it
-                    // also puts limit to the performance to some extent. There seems to be two
-                    // different ways to use ffmpeg-next's pipeline:
-                    // 1. Just create an empty video frame, pass it to the scaler, and let ffmpeg
-                    //    *allocate* a new buffer for you, set the video's data to be this new
-                    //    buffer, and you got yourself an allocated buffer that you have to, now,
-                    //    copy back to the buffer (cost: allocation + copying)
-                    // 2. Get your hands dirty, and set the data of the empty video frame to be
-                    //    your buffer directly so that the scaler can directly write to it and you
-                    //    do not have any allocation or copying.
-                    // We'll go with 2 :D
-                    unsafe {
-                        let frame_ptr = rgb_frame.as_mut_ptr();
-
-                        (*frame_ptr).data[0] = buffer.as_mut_ptr();
-                        (*frame_ptr).data[1] = ptr::null_mut();
-                        (*frame_ptr).data[2] = ptr::null_mut();
-                        (*frame_ptr).data[3] = ptr::null_mut();
-
-                        (*frame_ptr).linesize[0] = (video.width * 4) as i32;
-                        (*frame_ptr).linesize[1] = 0;
-                        (*frame_ptr).linesize[2] = 0;
-                        (*frame_ptr).linesize[3] = 0;
-                    }
-
+                    let mut rgb_frame = create_video_frame_from_buffer(
+                        video.width,
+                        video.height,
+                        ffmpeg::format::Pixel::RGBA,
+                        &mut buffer,
+                    );
                     video.scaler.run(&video.decoded, &mut rgb_frame)?;
-
                     outputs.push(ProcessOutput::Video(VideoFrame {
                         width: video.width,
                         height: video.height,
@@ -162,26 +176,13 @@ pub fn flush(
 
         while video.decoder.receive_frame(&mut video.decoded).is_ok() {
             if let Ok(mut buffer) = pool.get() {
-                let mut rgb_frame = ffmpeg::util::frame::Video::empty();
-                rgb_frame.set_width(video.width);
-                rgb_frame.set_height(video.height);
-                rgb_frame.set_format(ffmpeg::format::Pixel::RGBA);
-                unsafe {
-                    let frame_ptr = rgb_frame.as_mut_ptr();
-
-                    (*frame_ptr).data[0] = buffer.as_mut_ptr();
-                    (*frame_ptr).data[1] = ptr::null_mut();
-                    (*frame_ptr).data[2] = ptr::null_mut();
-                    (*frame_ptr).data[3] = ptr::null_mut();
-
-                    (*frame_ptr).linesize[0] = (video.width * 4) as i32;
-                    (*frame_ptr).linesize[1] = 0;
-                    (*frame_ptr).linesize[2] = 0;
-                    (*frame_ptr).linesize[3] = 0;
-                }
-
+                let mut rgb_frame = create_video_frame_from_buffer(
+                    video.width,
+                    video.height,
+                    ffmpeg::format::Pixel::RGBA,
+                    &mut buffer,
+                );
                 video.scaler.run(&video.decoded, &mut rgb_frame)?;
-
                 outputs.push(ProcessOutput::Video(VideoFrame {
                     width: video.width,
                     height: video.height,
