@@ -210,7 +210,8 @@ fn overlay_ui(
                 let mut position = video_playback.playback_frame_pts;
                 ui.add(egui::Slider::new(&mut position, 0..=duration).show_value(false));
 
-                ui.label(format!("{:.1}s", position));
+                let position_in_secs = engine.pts_in_seconds(track_id, position).unwrap_or(0.0);
+                ui.label(format!("{:.1}s", position_in_secs));
             });
         });
 }
