@@ -22,6 +22,7 @@ pub enum WorkerMessage {
     Initialized {
         width: u32,
         height: u32,
+        duration: i64,
         pool: FramePool,
         time_base: ffmpeg::Rational,
         start_pts: i64,
@@ -62,6 +63,7 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                                 .send(WorkerMessage::Initialized {
                                     width: video.width,
                                     height: video.height,
+                                    duration: video.duration,
                                     pool: pool.clone(),
                                     time_base,
                                     start_pts,

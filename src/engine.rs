@@ -32,6 +32,7 @@ struct MediaTrack {
     start_pts: Option<i64>,
     frame_pool: Option<FramePool>,
     size: Option<(u32, u32)>,
+    duration: Option<i64>,
     video_queue: VecDeque<VideoFrame>,
 }
 
@@ -63,6 +64,7 @@ impl MediaEngine {
                 frame_pool: None,
                 loop_enabled: false,
                 size: None,
+                duration: None,
                 time_base: None,
                 start_pts: None,
                 video_queue: VecDeque::new(),
@@ -156,6 +158,10 @@ impl MediaEngine {
         self.tracks.get(&id)?.size
     }
 
+    pub fn get_duration(&self, id: TrackId) -> Option<i64> {
+        self.tracks.get(&id)?.duration
+    }
+
     pub fn update(&mut self) {
         for track in self.tracks.values_mut() {
             while let Ok(msg) = track.worker.msg_rx.try_recv() {
@@ -164,12 +170,14 @@ impl MediaEngine {
                         pool,
                         width,
                         height,
+                        duration,
                         time_base,
                         start_pts,
                     } => {
                         track.worker_state = TrackState::Ready;
                         track.frame_pool = Some(pool);
                         track.size = Some((width, height));
+                        track.duration = Some(duration);
                         track.time_base = Some(time_base);
                         track.start_pts = Some(start_pts);
                     }

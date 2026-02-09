@@ -188,10 +188,10 @@ fn overlay_ui(
         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0])
         .show(context, |ui| {
             ui.horizontal(|ui| {
+                let Some(mut video_playback) = video_playback else {
+                    return;
+                };
                 if ui.button("Play/Pause").clicked() {
-                    let Some(mut video_playback) = video_playback else {
-                        return;
-                    };
                     match engine.get_state(track_id).unwrap() {
                         TrackState::Playing => {
                             engine.pause(track_id);
@@ -206,9 +206,9 @@ fn overlay_ui(
                     };
                 }
 
-                let duration = 100.0;
-                let mut position = 0.0;
-                ui.add(egui::Slider::new(&mut position, 0.0..=duration).show_value(false));
+                let duration = engine.get_duration(track_id).unwrap_or(0);
+                let mut position = video_playback.playback_frame_pts;
+                ui.add(egui::Slider::new(&mut position, 0..=duration).show_value(false));
 
                 ui.label(format!("{:.1}s", position));
             });

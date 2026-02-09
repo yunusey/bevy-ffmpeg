@@ -18,6 +18,7 @@ pub struct VideoState {
 
     pub width: u32,
     pub height: u32,
+    pub duration: i64,
 
     pub time_base: ffmpeg::Rational,
     pub start_pts: i64,
@@ -88,6 +89,7 @@ pub fn load_media_session(source: &str) -> Result<MediaSession, ffmpeg::Error> {
         let decoder = context.decoder().video()?;
         let width = decoder.width();
         let height = decoder.height();
+        let duration = stream.duration();
 
         let scaler = ffmpeg::software::scaling::Context::get(
             decoder.format(),
@@ -107,8 +109,11 @@ pub fn load_media_session(source: &str) -> Result<MediaSession, ffmpeg::Error> {
             decoder,
             scaler,
             decoded: ffmpeg::util::frame::Video::empty(),
+
             width,
             height,
+            duration,
+
             time_base,
             start_pts,
         })
