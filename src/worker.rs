@@ -114,6 +114,7 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                         }
 
                         msg_tx.send(WorkerMessage::EndOfStream).ok();
+                        playing = false;
                     }
 
                     Err(e) => {
