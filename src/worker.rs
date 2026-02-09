@@ -1,7 +1,7 @@
 use super::frame_pool::FramePool;
 use super::session::{
     MediaSession, Packet, ProcessOutput, VideoFrame, flush, load_media_session, process_packet,
-    read_packet,
+    read_packet, seek_pts,
 };
 use crossbeam_channel::{Receiver, Sender};
 use ffmpeg_next as ffmpeg;
@@ -15,7 +15,7 @@ pub enum WorkerCommand {
     Load(String),
     Play,
     Pause,
-    Seek(f64),
+    Seek(i64),
 }
 
 pub enum WorkerMessage {
@@ -30,6 +30,7 @@ pub enum WorkerMessage {
     VideoFrame(VideoFrame),
     EndOfStream,
     Error(String),
+    SeekingCompleted(i64),
 }
 
 pub fn spawn_worker_thread() -> WorkerHandle {
@@ -82,8 +83,22 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                 WorkerCommand::Play => playing = true,
                 WorkerCommand::Pause => playing = false,
 
-                // The most difficult one probably :D
-                WorkerCommand::Seek(val) => _ = val,
+                WorkerCommand::Seek(val) => {
+                    if let Some(s) = &mut session {
+                        match seek_pts(s, val) {
+                            Err(e) => msg_tx
+                                .send(WorkerMessage::Error(e.to_string()))
+                                .ok()
+                                .unwrap(),
+                            _ => {
+                                msg_tx
+                                    .send(WorkerMessage::SeekingCompleted(val))
+                                    .ok()
+                                    .unwrap();
+                            }
+                        };
+                    }
+                }
             }
         }
 
@@ -97,7 +112,7 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                             for output in outputs {
                                 match output {
                                     ProcessOutput::Video(frame) => {
-                                        msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
+                                        msg_tx.try_send(WorkerMessage::VideoFrame(frame)).ok();
                                     }
                                 }
                             }
@@ -109,18 +124,18 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                             for output in outputs {
                                 match output {
                                     ProcessOutput::Video(frame) => {
-                                        msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
+                                        msg_tx.try_send(WorkerMessage::VideoFrame(frame)).ok();
                                     }
                                 }
                             }
                         }
 
-                        msg_tx.send(WorkerMessage::EndOfStream).ok();
+                        msg_tx.try_send(WorkerMessage::EndOfStream).ok();
                         playing = false;
                     }
 
                     Err(e) => {
-                        msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
+                        msg_tx.try_send(WorkerMessage::Error(e.to_string())).ok();
                     }
                 }
             }

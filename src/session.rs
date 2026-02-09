@@ -1,4 +1,5 @@
 use super::frame_pool::FramePool;
+use ffmpeg::rescale::{Rescale, TIME_BASE};
 use ffmpeg_next as ffmpeg;
 use std::ptr;
 
@@ -199,4 +200,13 @@ pub fn flush(
     }
 
     Ok(outputs)
+}
+
+pub fn seek_pts(session: &mut MediaSession, pts: i64) -> Result<(), ffmpeg::Error> {
+    if let Some(video) = &mut session.video {
+        let position = pts.rescale(video.time_base, TIME_BASE);
+        session.input_format_ctx.seek(position, ..position + 1)?;
+        video.decoder.flush();
+    }
+    Ok(())
 }
