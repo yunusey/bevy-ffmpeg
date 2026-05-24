@@ -31,7 +31,6 @@ struct MediaTrack {
     desired_state: TrackState,
     worker_state: TrackState,
     worker: WorkerHandle,
-    loop_enabled: bool,
     time_base: Option<ffmpeg::Rational>,
     start_pts: Option<i64>,
     frame_pool: Option<FramePool>,
@@ -66,7 +65,6 @@ impl MediaEngine {
                 worker_state: TrackState::Loading,
                 worker: worker,
                 frame_pool: None,
-                loop_enabled: false,
                 size: None,
                 duration: None,
                 time_base: None,
@@ -99,13 +97,6 @@ impl MediaEngine {
     pub fn pause(&mut self, id: TrackId) {
         match self.tracks.get_mut(&id) {
             Some(ref mut track) => track.desired_state = TrackState::Paused,
-            None => {}
-        };
-    }
-
-    pub fn set_loop(&mut self, id: TrackId, enabled: bool) {
-        match self.tracks.get_mut(&id) {
-            Some(ref mut track) => track.loop_enabled = enabled,
             None => {}
         };
     }
@@ -199,16 +190,8 @@ impl MediaEngine {
                         track.video_queue.push_front(frame);
                     }
                     WorkerMessage::Error(e) => track.worker_state = TrackState::Error(e),
-                    WorkerMessage::EndOfStream => {
-                        if track.loop_enabled {
-                            track.worker.cmd_tx.send(WorkerCommand::Seek(0)).ok();
-                            track.worker_state = TrackState::Playing;
-                        } else {
-                            track.worker_state = TrackState::Ended;
-                        }
-                    }
+                    WorkerMessage::EndOfStream => track.worker_state = TrackState::Ended,
                     WorkerMessage::SeekingCompleted(val) => {
-                        // Ready to play, but requires engine.play(track_id) to be called.
                         track.worker_state = TrackState::SeekingCompleted(val);
                         track.desired_state = TrackState::Ready;
                     }

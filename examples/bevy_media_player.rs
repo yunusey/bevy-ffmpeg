@@ -129,7 +129,7 @@ fn video_update_system(
                 return;
             };
 
-            // This loop will traverse the deque of frames and choose the one that is just before our
+            // This loop will traverse the dequeue of frames and choose the one that is just before our
             // current playback time. All frames that are to the left of the best frame have pts lower than
             // it, so we recycle them along the way. Uploading to GPU is expensive, so we try not to do
             // that here :D
