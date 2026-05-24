@@ -1,7 +1,7 @@
 use super::frame_pool::FramePool;
 use super::session::{
-    MediaSession, Packet, ProcessOutput, VideoFrame, flush, load_media_session, process_packet,
-    read_packet,
+    DecodeEvent, MediaSession, Packet, VideoFrame, load_media_session, read_packet, seek_pts,
+    try_receive_frame,
 };
 use crossbeam_channel::{Receiver, Sender};
 use ffmpeg_next as ffmpeg;
@@ -15,7 +15,7 @@ pub enum WorkerCommand {
     Load(String),
     Play,
     Pause,
-    Seek(f64),
+    Seek(i64),
 }
 
 pub enum WorkerMessage {
@@ -30,6 +30,7 @@ pub enum WorkerMessage {
     VideoFrame(VideoFrame),
     EndOfStream,
     Error(String),
+    SeekingCompleted(i64),
 }
 
 pub fn spawn_worker_thread() -> WorkerHandle {
@@ -43,12 +44,20 @@ pub fn spawn_worker_thread() -> WorkerHandle {
     WorkerHandle { cmd_tx, msg_rx }
 }
 
-pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
+fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
     let mut session: Option<MediaSession> = None;
     let mut frame_pool: Option<FramePool> = None;
 
     let mut playing = false;
+    let mut pending_seek: Option<i64> = None;
+    let mut flushing = false;
 
+    // The loop will first drain all the commands pushed to the queue, and then will decode exactly
+    // one frame (if playing) and will check if there have been a new command pushed to the queue
+    // that needs to be processed. That is why we use a non-blocking `recv`, `try_recv`.
+    //
+    // TODO: If not playing, we should probably block until a new command is received. We are busy
+    // waiting right now.
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
@@ -72,6 +81,7 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                             frame_pool = Some(pool);
                         };
                         session = Some(s);
+                        flushing = false;
                     }
                     Err(e) => msg_tx
                         .send(WorkerMessage::Error(e.to_string()))
@@ -82,46 +92,89 @@ pub fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage
                 WorkerCommand::Play => playing = true,
                 WorkerCommand::Pause => playing = false,
 
-                // The most difficult one probably :D
-                WorkerCommand::Seek(val) => _ = val,
+                WorkerCommand::Seek(val) => {
+                    pending_seek = Some(val);
+                }
             }
         }
 
-        if playing {
-            if let Some(s) = session.as_mut()
-                && let Some(pool) = &frame_pool
-            {
-                match read_packet(s) {
-                    Ok(Packet::Packet(packet)) => {
-                        if let Ok(outputs) = process_packet(s, &packet, &pool) {
-                            for output in outputs {
-                                match output {
-                                    ProcessOutput::Video(frame) => {
-                                        msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Ok(Packet::Eof) => {
-                        if let Ok(outputs) = flush(s, &pool) {
-                            for output in outputs {
-                                match output {
-                                    ProcessOutput::Video(frame) => {
-                                        msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
-                                    }
-                                }
-                            }
-                        }
-
-                        msg_tx.send(WorkerMessage::EndOfStream).ok();
-                        playing = false;
-                    }
-
+        if let Some(val) = pending_seek.take() {
+            if let Some(s) = &mut session {
+                match seek_pts(s, val) {
                     Err(e) => {
                         msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
                     }
+                    _ => {
+                        msg_tx.send(WorkerMessage::SeekingCompleted(val)).ok();
+                    }
+                }
+            }
+            flushing = false;
+            continue;
+        }
+
+        if playing
+            && let Some(s) = session.as_mut()
+            && let Some(pool) = &frame_pool
+        {
+            // We processed all the frames in the current packet, check if there are new packets.
+            if s.video.is_none() {
+                match read_packet(s) {
+                    Ok(Packet::Packet(_)) => {}
+                    Ok(Packet::Eof) => {
+                        msg_tx.send(WorkerMessage::EndOfStream).ok();
+                        playing = false;
+                    }
+                    Err(e) => {
+                        msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
+                        playing = false;
+                    }
+                }
+                continue;
+            }
+
+            match try_receive_frame(s, pool) {
+                Ok(DecodeEvent::Frame(frame)) => {
+                    msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
+                }
+                Ok(DecodeEvent::Eof) => {
+                    msg_tx.send(WorkerMessage::EndOfStream).ok();
+                    playing = false;
+                    flushing = false;
+                }
+                Ok(DecodeEvent::NeedData) => {
+                    if flushing {
+                        msg_tx.send(WorkerMessage::EndOfStream).ok();
+                        playing = false;
+                        flushing = false;
+                    } else {
+                        match read_packet(s) {
+                            Ok(Packet::Packet(packet)) => {
+                                if let Some(video) = &mut s.video {
+                                    if packet.stream() == video.stream_index {
+                                        if let Err(e) = video.decoder.send_packet(&packet) {
+                                            msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
+                                            playing = false;
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(Packet::Eof) => {
+                                if let Some(video) = &mut s.video {
+                                    video.decoder.send_eof().ok();
+                                }
+                                flushing = true;
+                            }
+                            Err(e) => {
+                                msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
+                                playing = false;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
+                    playing = false;
                 }
             }
         }

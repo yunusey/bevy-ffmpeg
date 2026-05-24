@@ -20,6 +20,10 @@ pub enum TrackState {
     Playing,
     Paused,
     Ended,
+
+    SeekingInProgress,
+    SeekingCompleted(i64),
+
     Error(String),
 }
 
@@ -106,11 +110,21 @@ impl MediaEngine {
         };
     }
 
-    pub fn seek(&mut self, id: TrackId, seconds: f64) {
+    pub fn seek(&mut self, id: TrackId, pts: i64) {
         match self.tracks.get_mut(&id) {
             Some(ref mut track) => {
-                track.desired_state = TrackState::Playing;
-                track.worker.cmd_tx.send(WorkerCommand::Seek(seconds)).ok();
+                // If we are not playing or paused, we can't seek (prevents double-seeking and more
+                // :D)
+                if track.worker_state != TrackState::Playing
+                    && track.worker_state != TrackState::Paused
+                {
+                    return;
+                }
+                track.worker_state = TrackState::SeekingInProgress;
+                track.worker.cmd_tx.send(WorkerCommand::Seek(pts)).ok();
+                while let Some(frame) = track.video_queue.pop_back() {
+                    track.frame_pool.as_ref().unwrap().recycle(frame.data).ok();
+                }
             }
             None => {}
         };
@@ -187,23 +201,31 @@ impl MediaEngine {
                     WorkerMessage::Error(e) => track.worker_state = TrackState::Error(e),
                     WorkerMessage::EndOfStream => {
                         if track.loop_enabled {
-                            track.worker.cmd_tx.send(WorkerCommand::Seek(0.0)).ok();
+                            track.worker.cmd_tx.send(WorkerCommand::Seek(0)).ok();
                             track.worker_state = TrackState::Playing;
                         } else {
                             track.worker_state = TrackState::Ended;
                         }
                     }
+                    WorkerMessage::SeekingCompleted(val) => {
+                        // Ready to play, but requires engine.play(track_id) to be called.
+                        track.worker_state = TrackState::SeekingCompleted(val);
+                        track.desired_state = TrackState::Ready;
+                    }
                 }
             }
             if track.worker_state != track.desired_state {
-                match track.desired_state {
-                    TrackState::Playing => {
+                match (&track.desired_state, &track.worker_state) {
+                    (TrackState::Playing, TrackState::Paused | TrackState::Ready) => {
                         track.worker.cmd_tx.send(WorkerCommand::Play).ok();
                         track.worker_state = TrackState::Playing;
                     }
-                    TrackState::Paused => {
+                    (TrackState::Paused, TrackState::Playing) => {
                         track.worker.cmd_tx.send(WorkerCommand::Pause).ok();
                         track.worker_state = TrackState::Paused;
+                    }
+                    (TrackState::Playing | TrackState::Paused, TrackState::SeekingCompleted(_)) => {
+                        track.worker_state = track.desired_state.clone();
                     }
                     // If the desired state is not one of them, we ignore them as it doesn't quite
                     // make sense
