@@ -117,31 +117,19 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
             && let Some(s) = session.as_mut()
             && let Some(pool) = &frame_pool
         {
-            // We processed all the frames in the current packet, check if there are new packets.
-            if s.video.is_none() {
-                match read_packet(s) {
-                    Ok(Packet::Packet(_)) => {}
-                    Ok(Packet::Eof) => {
-                        msg_tx.send(WorkerMessage::EndOfStream).ok();
-                        playing = false;
-                    }
-                    Err(e) => {
-                        msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
-                        playing = false;
-                    }
-                }
-                continue;
-            }
-
             match try_receive_frame(s, pool) {
+                // There is a readily available frame. Send it.
                 Ok(DecodeEvent::Frame(frame)) => {
                     msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
                 }
+                // Reached the end.
                 Ok(DecodeEvent::Eof) => {
                     msg_tx.send(WorkerMessage::EndOfStream).ok();
                     playing = false;
                     flushing = false;
                 }
+                // We need more packets to continue processing. Read packet, and send the packets
+                // to the decoder.
                 Ok(DecodeEvent::NeedData) => {
                     if flushing {
                         msg_tx.send(WorkerMessage::EndOfStream).ok();
