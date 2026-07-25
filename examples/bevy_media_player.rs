@@ -112,16 +112,14 @@ fn video_update_system(
             // Now, we need to ask the engine to play our video
             engine.play(track_id);
         }
-        TrackState::Paused | TrackState::SeekingInProgress | TrackState::Ended => {
+        TrackState::SeekingInProgress | TrackState::Ended => {
             return;
         }
-        TrackState::SeekingCompleted(val) => {
-            let Some(mut video_playback) = video_playback else {
-                return;
-            };
-            video_playback.playback_init_time = current_time;
-            video_playback.playback_init_pts = val;
-            engine.play(track_id);
+        TrackState::SeekingCompleted(_) => {
+            // Don't rely on this; it will move to the 'Playing' or 'Paused' state immediately.
+            // We could, technically, wait one frame after SeekingCompleted, but then we wouldn't
+            // be decoding as fast as we can.
+            // TODO: Figure out the best solution here.
         }
         TrackState::Error(e) => eprintln!("Track experiences an error: {e}"),
         TrackState::Playing => {
@@ -132,7 +130,7 @@ fn video_update_system(
             // This loop will traverse the dequeue of frames and choose the one that is just before our
             // current playback time. All frames that are to the left of the best frame have pts lower than
             // it, so we recycle them along the way. Uploading to GPU is expensive, so we try not to do
-            // that here :D
+            // that here.
             let playback_time = current_time - video_playback.playback_init_time
                 + engine
                     .pts_in_seconds(track_id, video_playback.playback_init_pts)
@@ -179,6 +177,40 @@ fn video_update_system(
                 engine.reycle_video_frame_buffer(track_id, old_buffer);
             }
             video_playback.playback_frame_pts = frame.pts.unwrap();
+        }
+        TrackState::Paused => {
+            let Some(mut video_playback) = video_playback else {
+                return;
+            };
+            // While paused (e.g. after a seek), show the newest queued frame once.
+            let mut best_frame: Option<VideoFrame> = None;
+            while let Some(frame) = engine.try_get_video_frame(track_id) {
+                if frame.pts.is_none() {
+                    engine.reycle_video_frame_buffer(track_id, frame.data);
+                    continue;
+                }
+                if let Some(old) = best_frame.take() {
+                    engine.reycle_video_frame_buffer(track_id, old.data);
+                }
+                best_frame = Some(frame);
+            }
+            let Some(frame) = best_frame else {
+                return;
+            };
+            let Some(handle) = &video_texture.handle else {
+                return;
+            };
+            let Some(image) = images.get_mut(handle) else {
+                return;
+            };
+            if let Some(old_buffer) = image.data.replace(frame.data) {
+                engine.reycle_video_frame_buffer(track_id, old_buffer);
+            }
+            let pts = frame.pts.unwrap();
+            video_playback.playback_frame_pts = pts;
+            // Keep clock aligned so Play resumes from this scrub position.
+            video_playback.playback_init_pts = pts;
+            video_playback.playback_init_time = current_time;
         }
     }
 }
@@ -233,6 +265,8 @@ fn overlay_ui(
                     )
                     .changed()
                 {
+                    video_playback.playback_init_time = time.elapsed_secs_f64();
+                    video_playback.playback_init_pts = ui_state.slider_pos;
                     engine.seek(track_id, ui_state.slider_pos);
                 }
 

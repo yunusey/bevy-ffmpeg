@@ -33,6 +33,7 @@ pub struct MediaSession {
 pub enum DecodeEvent {
     Frame(VideoFrame),
     NeedData,
+    Discarded,
     Eof,
 }
 
@@ -142,6 +143,7 @@ pub fn read_packet(session: &mut MediaSession) -> Result<Packet, ffmpeg::Error> 
 pub(crate) fn try_receive_frame(
     session: &mut MediaSession,
     pool: &FramePool,
+    discard_before: Option<i64>,
 ) -> Result<DecodeEvent, ffmpeg::Error> {
     let video = match &mut session.video {
         Some(v) => v,
@@ -151,6 +153,18 @@ pub(crate) fn try_receive_frame(
     match video.decoder.receive_frame(&mut video.decoded) {
         // The decoder had enough packets to process a new frame. Return the new decoded frame.
         Ok(()) => {
+            // If the decoder returned a frame that is before `discard_before`, just discard it
+            // (don't waste time running scaler)
+            if let Some(min_pts) = discard_before {
+                match video.decoded.pts() {
+                    None => return Ok(DecodeEvent::Discarded),
+                    Some(pts) => {
+                        if pts < min_pts {
+                            return Ok(DecodeEvent::Discarded);
+                        }
+                    }
+                };
+            }
             if let Ok(mut buffer) = pool.get() {
                 let mut rgb_frame = create_video_frame_from_buffer(
                     video.width,

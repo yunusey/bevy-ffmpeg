@@ -187,13 +187,22 @@ impl MediaEngine {
                         track.start_pts = Some(start_pts);
                     }
                     WorkerMessage::VideoFrame(frame) => {
-                        track.video_queue.push_front(frame);
+                        // If we are seeking and a new frame came in (before SeekingCompleted), we
+                        // simply recycle it.
+                        if track.worker_state == TrackState::SeekingInProgress {
+                            if let Some(pool) = &track.frame_pool {
+                                pool.recycle(frame.data).ok();
+                            } else {
+                                unreachable!();
+                            }
+                        } else {
+                            track.video_queue.push_front(frame);
+                        }
                     }
                     WorkerMessage::Error(e) => track.worker_state = TrackState::Error(e),
                     WorkerMessage::EndOfStream => track.worker_state = TrackState::Ended,
                     WorkerMessage::SeekingCompleted(val) => {
                         track.worker_state = TrackState::SeekingCompleted(val);
-                        track.desired_state = TrackState::Ready;
                     }
                 }
             }
@@ -207,8 +216,13 @@ impl MediaEngine {
                         track.worker.cmd_tx.send(WorkerCommand::Pause).ok();
                         track.worker_state = TrackState::Paused;
                     }
-                    (TrackState::Playing | TrackState::Paused, TrackState::SeekingCompleted(_)) => {
-                        track.worker_state = track.desired_state.clone();
+                    (TrackState::Playing, TrackState::SeekingCompleted(_)) => {
+                        track.worker.cmd_tx.send(WorkerCommand::Play).ok();
+                        track.worker_state = TrackState::Playing;
+                    }
+                    (TrackState::Paused, TrackState::SeekingCompleted(_)) => {
+                        track.worker.cmd_tx.send(WorkerCommand::Pause).ok();
+                        track.worker_state = TrackState::Paused;
                     }
                     // If the desired state is not one of them, we ignore them as it doesn't quite
                     // make sense

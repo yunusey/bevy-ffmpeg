@@ -51,6 +51,7 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
     let mut playing = false;
     let mut pending_seek: Option<i64> = None;
     let mut flushing = false;
+    let mut discard_before: Option<i64> = None;
 
     // The loop will first drain all the commands pushed to the queue, and then will decode exactly
     // one frame (if playing) and will check if there have been a new command pushed to the queue
@@ -105,7 +106,7 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
                         msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
                     }
                     _ => {
-                        msg_tx.send(WorkerMessage::SeekingCompleted(val)).ok();
+                        discard_before = Some(val);
                     }
                 }
             }
@@ -113,20 +114,35 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
             continue;
         }
 
-        if playing
+        // If we are playing or we need to keep decoding until some PTS (during seek), keep decoding.
+        if (playing || discard_before.is_some())
             && let Some(s) = session.as_mut()
             && let Some(pool) = &frame_pool
         {
-            match try_receive_frame(s, pool) {
+            match try_receive_frame(s, pool, discard_before) {
                 // There is a readily available frame. Send it.
                 Ok(DecodeEvent::Frame(frame)) => {
+                    // We were seeking and we finally have a frame during/after `discard_before` so
+                    // we completed seeking.
+                    if let Some(min_pts) = discard_before {
+                        if let Some(pts) = frame.pts {
+                            assert!(pts >= min_pts);
+                            msg_tx.send(WorkerMessage::SeekingCompleted(pts)).ok();
+                            discard_before = None;
+                        } else {
+                            unreachable!();
+                        }
+                    }
                     msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
                 }
+                // We have received a frame that is before `discarded_before` so just keep looping.
+                Ok(DecodeEvent::Discarded) => {}
                 // Reached the end.
                 Ok(DecodeEvent::Eof) => {
                     msg_tx.send(WorkerMessage::EndOfStream).ok();
                     playing = false;
                     flushing = false;
+                    discard_before = None;
                 }
                 // We need more packets to continue processing. Read packet, and send the packets
                 // to the decoder.
@@ -135,6 +151,7 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
                         msg_tx.send(WorkerMessage::EndOfStream).ok();
                         playing = false;
                         flushing = false;
+                        discard_before = None;
                     } else {
                         match read_packet(s) {
                             Ok(Packet::Packet(packet)) => {
@@ -143,6 +160,7 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
                                         if let Err(e) = video.decoder.send_packet(&packet) {
                                             msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
                                             playing = false;
+                                            discard_before = None;
                                         }
                                     }
                                 }
@@ -156,6 +174,7 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
                             Err(e) => {
                                 msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
                                 playing = false;
+                                discard_before = None;
                             }
                         }
                     }
@@ -163,6 +182,7 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
                 Err(e) => {
                     msg_tx.send(WorkerMessage::Error(e.to_string())).ok();
                     playing = false;
+                    discard_before = None;
                 }
             }
         }
