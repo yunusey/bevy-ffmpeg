@@ -1,4 +1,5 @@
 use super::frame_pool::FramePool;
+use ffmpeg::rescale::{Rescale, TIME_BASE};
 use ffmpeg_next as ffmpeg;
 use std::ptr;
 
@@ -18,6 +19,7 @@ pub struct VideoState {
 
     pub width: u32,
     pub height: u32,
+    pub duration: i64,
 
     pub time_base: ffmpeg::Rational,
     pub start_pts: i64,
@@ -28,8 +30,11 @@ pub struct MediaSession {
     pub video: Option<VideoState>,
 }
 
-pub enum ProcessOutput {
-    Video(VideoFrame),
+pub enum DecodeEvent {
+    Frame(VideoFrame),
+    NeedData,
+    Discarded,
+    Eof,
 }
 
 pub enum Packet {
@@ -88,6 +93,7 @@ pub fn load_media_session(source: &str) -> Result<MediaSession, ffmpeg::Error> {
         let decoder = context.decoder().video()?;
         let width = decoder.width();
         let height = decoder.height();
+        let duration = stream.duration();
 
         let scaler = ffmpeg::software::scaling::Context::get(
             decoder.format(),
@@ -107,8 +113,11 @@ pub fn load_media_session(source: &str) -> Result<MediaSession, ffmpeg::Error> {
             decoder,
             scaler,
             decoded: ffmpeg::util::frame::Video::empty(),
+
             width,
             height,
+            duration,
+
             time_base,
             start_pts,
         })
@@ -131,50 +140,31 @@ pub fn read_packet(session: &mut MediaSession) -> Result<Packet, ffmpeg::Error> 
     }
 }
 
-pub fn process_packet(
+pub(crate) fn try_receive_frame(
     session: &mut MediaSession,
-    packet: &ffmpeg::Packet,
     pool: &FramePool,
-) -> Result<Vec<ProcessOutput>, ffmpeg::Error> {
-    let mut outputs = Vec::new();
+    discard_before: Option<i64>,
+) -> Result<DecodeEvent, ffmpeg::Error> {
+    let video = match &mut session.video {
+        Some(v) => v,
+        None => return Ok(DecodeEvent::NeedData),
+    };
 
-    if let Some(video) = &mut session.video {
-        if packet.stream() == video.stream_index {
-            video.decoder.send_packet(packet)?;
-
-            while video.decoder.receive_frame(&mut video.decoded).is_ok() {
-                if let Ok(mut buffer) = pool.get() {
-                    let mut rgb_frame = create_video_frame_from_buffer(
-                        video.width,
-                        video.height,
-                        ffmpeg::format::Pixel::RGBA,
-                        &mut buffer,
-                    );
-                    video.scaler.run(&video.decoded, &mut rgb_frame)?;
-                    outputs.push(ProcessOutput::Video(VideoFrame {
-                        width: video.width,
-                        height: video.height,
-                        data: buffer,
-                        pts: video.decoded.pts(),
-                    }));
-                }
+    match video.decoder.receive_frame(&mut video.decoded) {
+        // The decoder had enough packets to process a new frame. Return the new decoded frame.
+        Ok(()) => {
+            // If the decoder returned a frame that is before `discard_before`, just discard it
+            // (don't waste time running scaler)
+            if let Some(min_pts) = discard_before {
+                match video.decoded.pts() {
+                    None => return Ok(DecodeEvent::Discarded),
+                    Some(pts) => {
+                        if pts < min_pts {
+                            return Ok(DecodeEvent::Discarded);
+                        }
+                    }
+                };
             }
-        }
-    }
-
-    Ok(outputs)
-}
-
-pub fn flush(
-    session: &mut MediaSession,
-    pool: &FramePool,
-) -> Result<Vec<ProcessOutput>, ffmpeg::Error> {
-    let mut outputs = Vec::new();
-
-    if let Some(video) = &mut session.video {
-        video.decoder.send_eof().ok();
-
-        while video.decoder.receive_frame(&mut video.decoded).is_ok() {
             if let Ok(mut buffer) = pool.get() {
                 let mut rgb_frame = create_video_frame_from_buffer(
                     video.width,
@@ -183,15 +173,33 @@ pub fn flush(
                     &mut buffer,
                 );
                 video.scaler.run(&video.decoded, &mut rgb_frame)?;
-                outputs.push(ProcessOutput::Video(VideoFrame {
+                Ok(DecodeEvent::Frame(VideoFrame {
                     width: video.width,
                     height: video.height,
                     data: buffer,
                     pts: video.decoded.pts(),
-                }));
+                }))
+            } else {
+                Ok(DecodeEvent::NeedData)
             }
         }
+        // The decoder came across to Eof--this happens if and only if the packets themselves reach
+        // Eof! So, this is a direct indication of "we are done with all processable frames"
+        Err(ffmpeg::error::Error::Eof) => Ok(DecodeEvent::Eof),
+        // The decoder needs new packets to be able to decode more frames.
+        Err(ffmpeg::error::Error::Other {
+            errno: ffmpeg::error::EAGAIN,
+        }) => Ok(DecodeEvent::NeedData),
+        // Any other error (e.g., corrupted data) is a real error.
+        Err(e) => Err(e),
     }
+}
 
-    Ok(outputs)
+pub fn seek_pts(session: &mut MediaSession, pts: i64) -> Result<(), ffmpeg::Error> {
+    if let Some(video) = &mut session.video {
+        let position = pts.rescale(video.time_base, TIME_BASE);
+        session.input_format_ctx.seek(position, ..position + 1)?;
+        video.decoder.flush();
+    }
+    Ok(())
 }

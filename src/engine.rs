@@ -20,6 +20,10 @@ pub enum TrackState {
     Playing,
     Paused,
     Ended,
+
+    SeekingInProgress,
+    SeekingCompleted(i64),
+
     Error(String),
 }
 
@@ -27,11 +31,11 @@ struct MediaTrack {
     desired_state: TrackState,
     worker_state: TrackState,
     worker: WorkerHandle,
-    loop_enabled: bool,
     time_base: Option<ffmpeg::Rational>,
     start_pts: Option<i64>,
     frame_pool: Option<FramePool>,
     size: Option<(u32, u32)>,
+    duration: Option<i64>,
     video_queue: VecDeque<VideoFrame>,
 }
 
@@ -61,8 +65,8 @@ impl MediaEngine {
                 worker_state: TrackState::Loading,
                 worker: worker,
                 frame_pool: None,
-                loop_enabled: false,
                 size: None,
+                duration: None,
                 time_base: None,
                 start_pts: None,
                 video_queue: VecDeque::new(),
@@ -97,18 +101,20 @@ impl MediaEngine {
         };
     }
 
-    pub fn set_loop(&mut self, id: TrackId, enabled: bool) {
-        match self.tracks.get_mut(&id) {
-            Some(ref mut track) => track.loop_enabled = enabled,
-            None => {}
-        };
-    }
-
-    pub fn seek(&mut self, id: TrackId, seconds: f64) {
+    pub fn seek(&mut self, id: TrackId, pts: i64) {
         match self.tracks.get_mut(&id) {
             Some(ref mut track) => {
-                track.desired_state = TrackState::Playing;
-                track.worker.cmd_tx.send(WorkerCommand::Seek(seconds)).ok();
+                // If we are not playing or paused, we can't seek (prevents double-seeking).
+                if track.worker_state != TrackState::Playing
+                    && track.worker_state != TrackState::Paused
+                {
+                    return;
+                }
+                track.worker_state = TrackState::SeekingInProgress;
+                track.worker.cmd_tx.send(WorkerCommand::Seek(pts)).ok();
+                while let Some(frame) = track.video_queue.pop_back() {
+                    track.frame_pool.as_ref().unwrap().recycle(frame.data).ok();
+                }
             }
             None => {}
         };
@@ -156,6 +162,10 @@ impl MediaEngine {
         self.tracks.get(&id)?.size
     }
 
+    pub fn get_duration(&self, id: TrackId) -> Option<i64> {
+        self.tracks.get(&id)?.duration
+    }
+
     pub fn update(&mut self) {
         for track in self.tracks.values_mut() {
             while let Ok(msg) = track.worker.msg_rx.try_recv() {
@@ -164,36 +174,52 @@ impl MediaEngine {
                         pool,
                         width,
                         height,
+                        duration,
                         time_base,
                         start_pts,
                     } => {
                         track.worker_state = TrackState::Ready;
                         track.frame_pool = Some(pool);
                         track.size = Some((width, height));
+                        track.duration = Some(duration);
                         track.time_base = Some(time_base);
                         track.start_pts = Some(start_pts);
                     }
                     WorkerMessage::VideoFrame(frame) => {
-                        track.video_queue.push_front(frame);
+                        // If we are seeking and a new frame came in (before SeekingCompleted), we
+                        // simply recycle it.
+                        if track.worker_state == TrackState::SeekingInProgress {
+                            if let Some(pool) = &track.frame_pool {
+                                pool.recycle(frame.data).ok();
+                            } else {
+                                unreachable!();
+                            }
+                        } else {
+                            track.video_queue.push_front(frame);
+                        }
                     }
                     WorkerMessage::Error(e) => track.worker_state = TrackState::Error(e),
-                    WorkerMessage::EndOfStream => {
-                        if track.loop_enabled {
-                            track.worker.cmd_tx.send(WorkerCommand::Seek(0.0)).ok();
-                            track.worker_state = TrackState::Playing;
-                        } else {
-                            track.worker_state = TrackState::Ended;
-                        }
+                    WorkerMessage::EndOfStream => track.worker_state = TrackState::Ended,
+                    WorkerMessage::SeekingCompleted(val) => {
+                        track.worker_state = TrackState::SeekingCompleted(val);
                     }
                 }
             }
             if track.worker_state != track.desired_state {
-                match track.desired_state {
-                    TrackState::Playing => {
+                match (&track.desired_state, &track.worker_state) {
+                    (TrackState::Playing, TrackState::Paused | TrackState::Ready) => {
                         track.worker.cmd_tx.send(WorkerCommand::Play).ok();
                         track.worker_state = TrackState::Playing;
                     }
-                    TrackState::Paused => {
+                    (TrackState::Paused, TrackState::Playing) => {
+                        track.worker.cmd_tx.send(WorkerCommand::Pause).ok();
+                        track.worker_state = TrackState::Paused;
+                    }
+                    (TrackState::Playing, TrackState::SeekingCompleted(_)) => {
+                        track.worker.cmd_tx.send(WorkerCommand::Play).ok();
+                        track.worker_state = TrackState::Playing;
+                    }
+                    (TrackState::Paused, TrackState::SeekingCompleted(_)) => {
                         track.worker.cmd_tx.send(WorkerCommand::Pause).ok();
                         track.worker_state = TrackState::Paused;
                     }
