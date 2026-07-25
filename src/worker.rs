@@ -54,8 +54,8 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
     let mut discard_before: Option<i64> = None;
 
     // The loop will first drain all the commands pushed to the queue, and then will decode exactly
-    // one frame (if playing) and will check if there have been a new command pushed to the queue
-    // that needs to be processed. That is why we use a non-blocking `recv`, `try_recv`.
+    // one frame (if playing) and will check if there has been a new command pushed to the queue
+    // that needs to be processed. That is why we use the non-blocking `try_recv` over `recv`.
     //
     // TODO: If not playing, we should probably block until a new command is received. We are busy
     // waiting right now.
@@ -135,7 +135,7 @@ fn worker_loop(cmd_rx: Receiver<WorkerCommand>, msg_tx: Sender<WorkerMessage>) {
                     }
                     msg_tx.send(WorkerMessage::VideoFrame(frame)).ok();
                 }
-                // We have received a frame that is before `discarded_before` so just keep looping.
+                // We have received a frame that is before `discard_before` so just keep looping.
                 Ok(DecodeEvent::Discarded) => {}
                 // Reached the end.
                 Ok(DecodeEvent::Eof) => {

@@ -104,8 +104,7 @@ impl MediaEngine {
     pub fn seek(&mut self, id: TrackId, pts: i64) {
         match self.tracks.get_mut(&id) {
             Some(ref mut track) => {
-                // If we are not playing or paused, we can't seek (prevents double-seeking and more
-                // :D)
+                // If we are not playing or paused, we can't seek (prevents double-seeking).
                 if track.worker_state != TrackState::Playing
                     && track.worker_state != TrackState::Paused
                 {
