@@ -167,6 +167,9 @@ impl MediaEngine {
         }
     }
     pub fn seconds_in_pts(&self, id: TrackId, seconds: f64) -> Option<i64> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
         match self.tracks.get(&id) {
             Some(track) => {
                 let microseconds = (seconds * 1_000_000.0).round() as i64;
