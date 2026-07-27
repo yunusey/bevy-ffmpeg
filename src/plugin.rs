@@ -269,6 +269,11 @@ fn sync_engine_state(
                 commands.entity(entity_id).insert(clock);
                 if video_player.playing {
                     media_engine.play(*track_id);
+                } else {
+                    // HACK: I am still unsure what to do when moving from Ready to Paused, so for
+                    // now, just force a seek.
+                    media_engine.pause(*track_id);
+                    media_engine.seek_beginning(*track_id);
                 }
 
                 video_player.position = media_engine.pts_in_seconds(*track_id, pts).unwrap_or(0f64);

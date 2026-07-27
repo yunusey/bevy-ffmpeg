@@ -108,6 +108,7 @@ impl MediaEngine {
                 if track.worker_state != TrackState::Playing
                     && track.worker_state != TrackState::Paused
                     && track.worker_state != TrackState::Ended
+                    && track.worker_state != TrackState::Ready
                 {
                     return;
                 }
@@ -234,7 +235,7 @@ impl MediaEngine {
                         track.worker.cmd_tx.send(WorkerCommand::Play).ok();
                         track.worker_state = TrackState::Playing;
                     }
-                    (TrackState::Paused, TrackState::Playing) => {
+                    (TrackState::Paused, TrackState::Playing | TrackState::Ready) => {
                         track.worker.cmd_tx.send(WorkerCommand::Pause).ok();
                         track.worker_state = TrackState::Paused;
                     }
