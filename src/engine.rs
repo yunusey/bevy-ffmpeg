@@ -107,6 +107,7 @@ impl MediaEngine {
                 // If we are not playing or paused, we can't seek (prevents double-seeking).
                 if track.worker_state != TrackState::Playing
                     && track.worker_state != TrackState::Paused
+                    && track.worker_state != TrackState::Ended
                 {
                     return;
                 }
@@ -118,6 +119,13 @@ impl MediaEngine {
             }
             None => {}
         };
+    }
+
+    pub fn seek_beginning(&mut self, id: TrackId) {
+        let Some(start_pts) = self.get_start_pts(id) else {
+            return;
+        };
+        self.seek(id, start_pts)
     }
 
     pub fn try_get_video_frame(&mut self, id: TrackId) -> Option<VideoFrame> {
@@ -157,6 +165,17 @@ impl MediaEngine {
             None => None,
         }
     }
+    pub fn seconds_in_pts(&self, id: TrackId, seconds: f64) -> Option<i64> {
+        match self.tracks.get(&id) {
+            Some(track) => {
+                let microseconds = (seconds * 1_000_000.0).round() as i64;
+                let relative_pts =
+                    microseconds.rescale(ffmpeg::mathematics::rescale::TIME_BASE, track.time_base?);
+                Some(relative_pts + track.start_pts?)
+            }
+            None => None,
+        }
+    }
 
     pub fn get_size(&self, id: TrackId) -> Option<(u32, u32)> {
         self.tracks.get(&id)?.size
@@ -164,6 +183,10 @@ impl MediaEngine {
 
     pub fn get_duration(&self, id: TrackId) -> Option<i64> {
         self.tracks.get(&id)?.duration
+    }
+
+    pub fn get_start_pts(&self, id: TrackId) -> Option<i64> {
+        self.tracks.get(&id)?.start_pts
     }
 
     pub fn update(&mut self) {
@@ -229,5 +252,11 @@ impl MediaEngine {
                 };
             }
         }
+    }
+}
+
+impl Default for MediaEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
