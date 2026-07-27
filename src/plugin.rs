@@ -1,10 +1,9 @@
 use crate::engine::{MediaEngine, TrackId, TrackState};
 use crate::session::VideoFrame;
 use bevy::asset::RenderAssetUsages;
-use bevy::math::UVec2;
 use bevy::prelude::{
     Added, App, Assets, Commands, Component, Entity, Handle, Image, IntoScheduleConfigs, Message,
-    MessageWriter, Plugin, Query, RemovedComponents, Res, ResMut, Resource, Time, Update,
+    MessageWriter, Plugin, Query, RemovedComponents, Res, ResMut, Resource, Time, UVec2, Update,
 };
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use std::collections::HashMap;
@@ -317,7 +316,7 @@ fn sync_frames_with_images(
     )>,
 ) {
     let current_time = time.elapsed_secs_f64();
-    for (entity_id, mut video_player, &track_id, mut clock, image_handler) in query.iter_mut() {
+    for (_entity_id, mut video_player, &track_id, mut clock, image_handler) in query.iter_mut() {
         let Some(state) = media_engine.get_state(*track_id) else {
             continue;
         };
