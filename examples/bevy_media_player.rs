@@ -1,8 +1,6 @@
-use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
-use bevy::render::render_resource::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
-use bevy_ffmpeg::{MediaEngine, TrackId, TrackState, VideoFrame};
+use bevy_ffmpeg::{FfmpegPlugin, VideoImage, VideoMessage, VideoPlayer};
 
 /// Unfortunately, we need to store the path in the main function directly, because if we try to
 /// use `setup` to read the path from the command line and then insert is as a resource (and if
@@ -13,26 +11,8 @@ use bevy_ffmpeg::{MediaEngine, TrackId, TrackState, VideoFrame};
 struct VideoPath(String);
 
 #[derive(Resource)]
-struct FfmpegData {
-    media_engine: MediaEngine,
-    track_id: TrackId,
-}
-
-#[derive(Resource, Default)]
-struct VideoTexture {
-    handle: Option<Handle<Image>>,
-}
-
-#[derive(Resource)]
-struct VideoPlayback {
-    playback_init_time: f64,
-    playback_init_pts: i64,
-    playback_frame_pts: i64,
-}
-
-#[derive(Resource)]
 struct UIState {
-    slider_pos: i64,
+    slider_pos: f64,
 }
 
 fn main() {
@@ -47,183 +27,50 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(EguiPlugin::default())
+        .add_plugins(FfmpegPlugin)
+        .insert_resource(VideoPath(track_path))
         .add_systems(Startup, setup)
         .add_systems(EguiPrimaryContextPass, overlay_ui)
-        .add_systems(Update, video_update_system)
-        .insert_resource(VideoPath(track_path))
+        .add_systems(Update, on_video_ready)
         .run();
 }
 
 fn setup(mut commands: Commands, video_path: Res<VideoPath>) {
     commands.spawn(Camera2d::default());
-    commands.insert_resource(VideoTexture { handle: None });
-
-    let mut engine = MediaEngine::new();
-    let track_id = engine.create_track(&video_path.0);
-    commands.insert_resource(FfmpegData {
-        media_engine: engine,
-        track_id,
-    });
-
-    commands.insert_resource(UIState { slider_pos: 0 });
+    commands.spawn(VideoPlayer::new(video_path.0.clone()).looping());
+    commands.insert_resource(UIState { slider_pos: 0f64 });
 }
 
-fn video_update_system(
-    time: Res<Time>,
+fn on_video_ready(
     mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut video_texture: ResMut<VideoTexture>,
-    video_playback: Option<ResMut<VideoPlayback>>,
-    mut ffmpeg_data: ResMut<FfmpegData>,
+    mut messages: MessageReader<VideoMessage>,
+    images: Query<&VideoImage>,
 ) {
-    let current_time = time.elapsed_secs_f64();
-    let track_id = ffmpeg_data.track_id;
-    let engine: &mut MediaEngine = &mut ffmpeg_data.media_engine;
-
-    engine.update();
-
-    match engine.get_state(track_id).unwrap() {
-        TrackState::Loading => return,
-        TrackState::Ready => {
-            let (width, height) = engine.get_size(track_id).unwrap();
-            // We don't need to initialize the image--it will be overridden by a frame message
-            // right away anyway.
-            let image = Image::new_uninit(
-                Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                TextureDimension::D2,
-                TextureFormat::Rgba8UnormSrgb,
-                RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-            );
-            let handle = images.add(image);
-            video_texture.handle = Some(handle.clone());
-            commands.spawn(Sprite::from_image(handle.clone()));
-
-            let video_playback = VideoPlayback {
-                playback_init_time: current_time,
-                playback_init_pts: 0,
-                playback_frame_pts: 0,
-            };
-            commands.insert_resource(video_playback);
-
-            // Now, we need to ask the engine to play our video
-            engine.play(track_id);
-        }
-        TrackState::SeekingInProgress | TrackState::Ended => {
-            return;
-        }
-        TrackState::SeekingCompleted(_) => {
-            // Don't rely on this; it will move to the 'Playing' or 'Paused' state immediately.
-            // We could, technically, wait one frame after SeekingCompleted, but then we wouldn't
-            // be decoding as fast as we can.
-            // TODO: Figure out the best solution here.
-        }
-        TrackState::Error(e) => eprintln!("Track experiences an error: {e}"),
-        TrackState::Playing => {
-            let Some(mut video_playback) = video_playback else {
-                return;
-            };
-
-            // This loop will traverse the dequeue of frames and choose the one that is just before our
-            // current playback time. All frames that are to the left of the best frame have pts lower than
-            // it, so we recycle them along the way. Uploading to GPU is expensive, so we try not to do
-            // that here.
-            let playback_time = current_time - video_playback.playback_init_time
-                + engine
-                    .pts_in_seconds(track_id, video_playback.playback_init_pts)
-                    .unwrap();
-            let mut best_frame: Option<VideoFrame> = None;
-            while let Some(frame) = engine.peek_video_frame(track_id) {
-                // We don't support invalid pts for now.
-                let Some(pts) = frame.pts else {
-                    let frame = engine.try_get_video_frame(track_id).unwrap();
-                    engine.reycle_video_frame_buffer(track_id, frame.data);
+    for message in messages.read() {
+        match message {
+            VideoMessage::Ready { entity, size: _ } => {
+                let Ok(video_image) = images.get(*entity) else {
                     continue;
                 };
-
-                let Some(pts_in_seconds) = engine.pts_in_seconds(track_id, pts) else {
-                    continue;
-                };
-
-                if pts_in_seconds <= playback_time {
-                    let frame = engine.try_get_video_frame(track_id).unwrap();
-                    if let Some(old_best_frame) = best_frame.take() {
-                        engine.reycle_video_frame_buffer(track_id, old_best_frame.data);
-                    }
-                    best_frame = Some(frame);
-                }
-                // We will assume that the next frame is in the future, so we break here.
-                else {
-                    break;
-                }
+                commands.spawn(Sprite::from_image(video_image.0.clone()));
             }
-
-            // We couldn't find a good frame... just stick to the old one.
-            let Some(frame) = best_frame else {
-                return;
-            };
-
-            // We have a good frame, so we upload it to GPU. We also recycle the old buffer if there is one.
-            let Some(handle) = &video_texture.handle else {
-                return;
-            };
-            let Some(image) = images.get_mut(handle) else {
-                return;
-            };
-            if let Some(old_buffer) = image.data.replace(frame.data) {
-                engine.reycle_video_frame_buffer(track_id, old_buffer);
+            VideoMessage::Ended { entity: _ } => {}
+            VideoMessage::Error { entity, message } => {
+                println!("Encountered error {message} during playback");
+                commands.entity(*entity).despawn();
             }
-            video_playback.playback_frame_pts = frame.pts.unwrap();
-        }
-        TrackState::Paused => {
-            let Some(mut video_playback) = video_playback else {
-                return;
-            };
-            // While paused (e.g. after a seek), show the newest queued frame once.
-            let mut best_frame: Option<VideoFrame> = None;
-            while let Some(frame) = engine.try_get_video_frame(track_id) {
-                if frame.pts.is_none() {
-                    engine.reycle_video_frame_buffer(track_id, frame.data);
-                    continue;
-                }
-                if let Some(old) = best_frame.take() {
-                    engine.reycle_video_frame_buffer(track_id, old.data);
-                }
-                best_frame = Some(frame);
-            }
-            let Some(frame) = best_frame else {
-                return;
-            };
-            let Some(handle) = &video_texture.handle else {
-                return;
-            };
-            let Some(image) = images.get_mut(handle) else {
-                return;
-            };
-            if let Some(old_buffer) = image.data.replace(frame.data) {
-                engine.reycle_video_frame_buffer(track_id, old_buffer);
-            }
-            let pts = frame.pts.unwrap();
-            video_playback.playback_frame_pts = pts;
-            // Keep clock aligned so Play resumes from this scrub position.
-            video_playback.playback_init_pts = pts;
-            video_playback.playback_init_time = current_time;
         }
     }
 }
 
 fn overlay_ui(
-    time: Res<Time>,
     mut contexts: EguiContexts,
     mut ui_state: ResMut<UIState>,
-    mut ffmpeg_data: ResMut<FfmpegData>,
-    video_playback: Option<ResMut<VideoPlayback>>,
+    mut query: Query<&mut VideoPlayer>,
 ) {
-    let track_id: TrackId = ffmpeg_data.track_id;
-    let engine: &mut MediaEngine = &mut ffmpeg_data.media_engine;
+    let Ok(mut player) = query.single_mut() else {
+        return;
+    };
 
     let Ok(context) = contexts.ctx_mut() else {
         eprintln!("Couldn't get the context in egui");
@@ -233,47 +80,29 @@ fn overlay_ui(
         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -20.0])
         .show(context, |ui| {
             ui.horizontal(|ui| {
-                let Some(mut video_playback) = video_playback else {
-                    return;
-                };
-                if ui.button("Play/Pause").clicked() {
-                    match engine.get_state(track_id).unwrap() {
-                        TrackState::Playing => {
-                            engine.pause(track_id);
-                        }
-                        TrackState::Paused => {
-                            // We continue from the current pts when we resume.
-                            video_playback.playback_init_time = time.elapsed_secs_f64();
-                            video_playback.playback_init_pts = video_playback.playback_frame_pts;
-                            engine.play(track_id);
-                        }
-                        _ => {}
-                    };
+                if ui
+                    .button(match player.is_playing() {
+                        true => "Pause",
+                        false => "Play",
+                    })
+                    .clicked()
+                {
+                    player.toggle_playing();
                 }
 
-                match engine.get_state(track_id).unwrap() {
-                    TrackState::Playing | TrackState::Paused => {
-                        ui_state.slider_pos = video_playback.playback_frame_pts;
-                    }
-                    _ => {}
-                }
-
-                let duration = engine.get_duration(track_id).unwrap_or(0);
+                let position = player.get_position();
+                let duration = player.get_duration().unwrap_or(100f64); // don't know what to do...
+                ui_state.slider_pos = position;
                 if ui
                     .add(
-                        egui::Slider::new(&mut ui_state.slider_pos, 0..=duration).show_value(false),
+                        egui::Slider::new(&mut ui_state.slider_pos, 0f64..=duration)
+                            .show_value(false),
                     )
                     .changed()
                 {
-                    video_playback.playback_init_time = time.elapsed_secs_f64();
-                    video_playback.playback_init_pts = ui_state.slider_pos;
-                    engine.seek(track_id, ui_state.slider_pos);
+                    player.seek_to(ui_state.slider_pos);
                 }
-
-                let position_in_secs = engine
-                    .pts_in_seconds(track_id, ui_state.slider_pos)
-                    .unwrap_or(0.0);
-                ui.label(format!("{:.1}s", position_in_secs));
+                ui.label(format!("{:.1}s", position));
             });
         });
 }
