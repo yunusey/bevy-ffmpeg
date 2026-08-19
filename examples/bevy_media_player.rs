@@ -37,7 +37,7 @@ fn main() {
 
 fn setup(mut commands: Commands, video_path: Res<VideoPath>) {
     commands.spawn(Camera2d::default());
-    commands.spawn(VideoPlayer::new(video_path.0.clone()).looping());
+    commands.spawn(VideoPlayer::new(video_path.0.clone()).autoplay().looping());
     commands.insert_resource(UIState { slider_pos: 0f64 });
 }
 
