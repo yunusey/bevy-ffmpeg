@@ -10,6 +10,30 @@ stays free of Bevy, in case you want it without an ECS.
 
 **This project is a work in progress and the API is unstable.**
 
+## Examples
+
+```bash
+cargo run --example bevy_media_player --features examples -- path/to/video.mp4
+cargo run --example rotating_video_cube --features example-3d -- path/to/video.mp4
+```
+
+### bevy_media_player
+
+https://github.com/user-attachments/assets/0515c393-ddc3-42a6-b8b9-6ff6774da912
+
+This demo is from [pixfx](https://github.com/yunusey/pixfx), a project I am
+working on that will let users edit their videos using shaders. pixfx is
+essentially based on `bevy_media_player`, with a considerable amount of
+configuration for shader effects. It is still a WIP, but once it is available,
+it can be found there.
+
+### rotating_video_cube
+
+https://github.com/user-attachments/assets/55e00808-649a-4c28-9930-767f43772327
+
+Both demos use copyrighted material from Young Justice Season 1 Episode 22. The
+video is available on [YouTube](https://www.youtube.com/watch?v=EZO5qgs4Px0).
+
 ## Status
 
 Working today:
@@ -70,13 +94,6 @@ and `get_duration()` for the playhead.
 
 You need FFmpeg development libraries on the system. This crate binds to them
 through `ffmpeg-next`.
-
-## Examples
-
-```bash
-cargo run --example bevy_media_player --features examples -- path/to/video.mp4
-cargo run --example rotating_video_cube --features example-3d -- path/to/video.mp4
-```
 
 ## License
 
