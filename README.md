@@ -71,10 +71,11 @@ and `get_duration()` for the playhead.
 You need FFmpeg development libraries on the system. This crate binds to them
 through `ffmpeg-next`.
 
-## Example
+## Examples
 
 ```bash
 cargo run --example bevy_media_player --features examples -- path/to/video.mp4
+cargo run --example rotating_video_cube --features example-3d -- path/to/video.mp4
 ```
 
 ## License
